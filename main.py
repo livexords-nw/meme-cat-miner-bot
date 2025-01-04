@@ -30,7 +30,7 @@ class memeCatMiner:
 
     def banner(self) -> None:
         """Displays the banner for the bot."""
-        self.log("🎉 Meme Cat Mainer Free Bot", Fore.CYAN)
+        self.log("🎉 Meme Cat Miner Free Bot", Fore.CYAN)
         self.log("🚀 Created by LIVEXORDS", Fore.CYAN)
         self.log("📢 Channel: t.me/livexordsscript\n", Fore.CYAN)
 
