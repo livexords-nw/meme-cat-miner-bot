@@ -1,8 +1,8 @@
 {
-    "task": true,
-    "cat": true,
-    "mining": true,
-    "delay_loop": 3000,
-    "delay_account_switch": 10
-  }
-  
+  "box": true,
+  "task": true,
+  "cat": true,
+  "mining": true,
+  "delay_loop": 3000,
+  "delay_account_switch": 10
+}  

@@ -27,6 +27,8 @@ class memeCatMiner:
         self.token = None
         self.coins = 0
         self.level = 0
+        self.mine_capacity = 0
+        self.claimed_lootboxes = 0
 
     def banner(self) -> None:
         """Displays the banner for the bot."""
@@ -142,14 +144,8 @@ class memeCatMiner:
                 else:
                     self.log("⚠️ Token not found in response.", Fore.YELLOW)
 
-                reward = result.get("reward", {})
-                coins = reward.get("coins", 0)
-                claimed_lootboxes = reward.get("claimed_lootboxes", 0)
-                new_player = result.get("new_player", False)
-
-                self.log(f"💰 Coins: {coins}", Fore.CYAN)
-                self.log(f"📦 Claimed Lootboxes: {claimed_lootboxes}", Fore.LIGHTYELLOW_EX)
-                self.log(f"🆕 New Player: {new_player}", Fore.LIGHTBLUE_EX)
+                self.update_info()
+                
             else:
                 self.log(f"⚠️ Login failed. Message: {data.get('msg', 'Unknown error')}", Fore.YELLOW)
 
@@ -193,21 +189,23 @@ class memeCatMiner:
                 return {}
 
             self.token = result.get("token", self.token) 
-            coins = result.get("coins", 0)
+            self.coins = int(float(result.get("coins", 0)))
             name = result.get("name", "Unknown")
             self.level = result.get("level", 0)
             rank = result.get("level_info", {}).get("rank", "Unknown")
             avatar = result.get("avatar", "")
+            self.mine_capacity = result.get("mine_capacity", "")
+            self.claimed_lootboxes = result.get("claimed_lootboxes", "")
 
             self.log("✅ Player info updated successfully!", Fore.GREEN)
             self.log(f"👤 Name: {name}", Fore.LIGHTGREEN_EX)
-            self.log(f"💎 Coins: {coins}", Fore.CYAN)
+            self.log(f"💎 Coins: {self.coins}", Fore.CYAN)
             self.log(f"🎖️ Level: {self.level} ({rank})", Fore.LIGHTBLUE_EX)
             self.log(f"🖼️ Avatar: {avatar}", Fore.LIGHTMAGENTA_EX)
 
             return {
                 "name": name,
-                "coins": coins,
+                "coins": self.coins,
                 "level": self.level,
                 "rank": rank,
                 "avatar": avatar,
@@ -304,11 +302,12 @@ class memeCatMiner:
 
     def cat(self):
         """
-        Fetches the cat list and attempts to purchase the most expensive cat available for the user's level 
-        until no more cats can be bought.
+        Mengambil daftar kucing dari API dan mencoba membeli kucing termahal yang bisa dibeli 
+        (berdasarkan properti `can_buy`) jika pengguna memiliki cukup koin.
+        Pastikan nilai self.coins dikonversi ke integer sebelum digunakan.
 
         Returns:
-            dict: A dictionary containing the result of the operation.
+            dict: Dictionary yang berisi hasil operasi pembelian.
         """
         try:
             headers = {"Authorization": self.token}
@@ -327,20 +326,21 @@ class memeCatMiner:
             cats = cat_data.get("result", {}).get("cat_list", [])
             self.log("✅ Cat list retrieved successfully!", Fore.GREEN)
 
-            # Step 2: Update user info (including coins and level)
+            # Step 2: Update user info (misalnya koin dan level)
             self.update_info()
 
-            available_cats = [cat for cat in cats if cat['level_limit'] <= self.level]
-            
+            # Filter kucing berdasarkan properti 'can_buy'
+            available_cats = [cat for cat in cats if cat.get('can_buy')]
+            # Urutkan kucing berdasarkan harga secara menurun (termahal di depan)
             available_cats.sort(key=lambda cat: cat['price'], reverse=True)
 
             purchased_cats = []
 
-            # Step 3: Try to purchase the most expensive cat that can be bought
+            # Step 3: Coba beli kucing termahal yang bisa dibeli
             for cat in available_cats:
                 if self.coins >= cat['price']:
                     self.log(f"📡 Attempting to buy {cat['name']} for {cat['price']} coins...", Fore.CYAN)
-                    buy_cat_url = f"{self.BASE_URL}store/buyCat"
+                    buy_cat_url = f"{self.BASE_URL}store/buyCat?breed_id={cat['breed_id']}"
                     payload = {"breed_id": cat['breed_id']}
                     response = requests.post(buy_cat_url, headers=headers, json=payload)
                     response.raise_for_status()
@@ -349,7 +349,9 @@ class memeCatMiner:
                     if buy_data.get("code") == 200:
                         self.log(f"✅ Successfully purchased {cat['name']}!", Fore.GREEN)
                         purchased_cats.append(cat['name'])
-                        break  
+                        # Jika pembelian berhasil, kita bisa mengurangi jumlah coins yang tersedia
+                        self.coins -= cat['price']
+                        break  # Hentikan loop setelah berhasil membeli satu kucing
                     else:
                         self.log(f"⚠️ Failed to purchase {cat['name']}: {buy_data.get('msg', 'Unknown error')}", Fore.YELLOW)
                 else:
@@ -370,97 +372,233 @@ class memeCatMiner:
 
     def mining(self):
         """
-        Handles mining-related operations for available cats.
+        Menangani operasi penambangan untuk kucing milik pengguna.
 
-        Checks the user's cat list, deploys the cat to the field if it's not already there,
-        starts the mining process for eligible cats, clicks the cat for coins, and buys additional slots if needed.
+        Proses:
+        1. Mengambil daftar kucing milik pengguna melalui GET {BASE_URL}cat/user.
+        2. Mengurutkan kucing berdasarkan profitabilitas (misalnya: mine_rate / time).
+        3. Untuk setiap kucing:
+            - Jika belum dideploy (in_field == False):
+                • Jika tidak ada slot (self.mine_capacity == 0), beli slot terlebih dahulu.
+                • Deploy kucing ke tambang dengan POST ke {BASE_URL}mine/onCapacity?cat_id=<cat_id>.
+                • Jika deploy gagal, coba beli slot lagi dan deploy ulang; jika masih gagal, lanjut ke kucing berikutnya.
+            - Jika kucing sudah dideploy tetapi belum mulai menambang (stage != "working"):
+                • Mulai penambangan dengan POST ke {BASE_URL}mine/start?cat_id=<cat_id>.
+        4. Mengambil daftar kucing yang sedang ada di tambang melalui GET {BASE_URL}mine/current.
+        5. Untuk setiap kucing dengan stage "working", klaim hasil tambang dengan POST ke {BASE_URL}mine/collect?cat_id=<cat_id>.
+        6. Melakukan klik pada cat untuk bonus coin dengan API:
+            GET {BASE_URL}mine/clickCat?cat_id={id_cat}&click_times=10
+            Contoh respons:
+            {
+                "code": 200,
+                "msg": "Click cat successfully",
+                "result": {
+                    "coins": 10,
+                    "remaining_clicks": 0
+                }
+            }
 
         Returns:
-            dict: A dictionary summarizing the mining status and any errors encountered.
+            dict: Ringkasan status operasi penambangan.
         """
         try:
             headers = {"Authorization": self.token}
+            mining_summary = {"deployed": [], "started": [], "collected": []}
 
-            # Step 1: Fetch cat list
-            self.log("📡 Fetching cat list...", Fore.CYAN)
-            cat_list_url = f"{self.BASE_URL}cat/list"
-            response = requests.get(cat_list_url, headers=headers)
-            response.raise_for_status()
+            # Step 1: Ambil daftar kucing milik pengguna
+            self.log("📡 Fetching user's cat list...", Fore.CYAN)
+            user_cat_url = f"{self.BASE_URL}cat/user"
+            user_response = requests.get(user_cat_url, headers=headers)
+            user_response.raise_for_status()
+            user_cat_data = user_response.json()
+            if user_cat_data.get("code") != 200:
+                self.log(f"⚠️ Failed to fetch user's cat list: {user_cat_data.get('msg', 'Unknown error')}", Fore.YELLOW)
+                return {"status": "error", "msg": "Failed to fetch user's cat list"}
+            
+            cats = user_cat_data.get("result", {}).get("cats", [])
+            self.log("✅ User's cat list retrieved successfully!", Fore.GREEN)
 
-            cat_data = response.json()
-            if cat_data.get("code") != 200:
-                self.log(f"⚠️ Failed to fetch cat list: {cat_data.get('msg', 'Unknown error')}", Fore.YELLOW)
-                return {"status": "error", "msg": "Failed to fetch cat list"}
+            # Step 1.5: Urutkan kucing berdasarkan profitabilitas (misalnya: mine_rate / time)
+            def profit_metric(cat):
+                t = cat.get("time", 0)
+                return cat.get("mine_rate", 0) / t if t > 0 else 0
 
-            cats = cat_data.get("result", {}).get("cats", [])
-            self.log("✅ Cat list retrieved successfully!", Fore.GREEN)
+            cats.sort(key=profit_metric, reverse=True)
+            self.log("📊 Cats sorted by profitability.", Fore.CYAN)
 
-            # Step 2: Deploy and start mining for eligible cats
-            mining_summary = {"deployed_cats": [], "mining_started": [], "clicked_cats": []}
-
+            # Step 2: Deploy & start mining untuk setiap kucing (berdasarkan urutan profit)
             for cat in cats:
-                if cat['user_owned'] == 1:
-                    cat_id = cat['user_cat_info'][0]['cat_id']
-                    if cat['user_mining'] == 0:
-                        if self.check_available_slots() == 0:
-                            self.log(f"⚠️ No available slots for {cat['name']}, attempting to buy a slot...", Fore.YELLOW)
-                            buy_slot_url = f"{self.BASE_URL}store/buySlot"
-                            buy_slot_response = requests.post(buy_slot_url, headers=headers)
-                            buy_slot_response.raise_for_status()
-
-                            buy_slot_data = buy_slot_response.json()
-                            if buy_slot_data.get("code") == 400 and "Coins not enough" in buy_slot_data.get("msg", ""):
-                                self.log("⚠️ Not enough coins to buy an additional slot.", Fore.YELLOW)
-                                return {"status": "error", "msg": "Not enough coins to buy additional slot."}
+                cat_id = cat["cat_id"]
+                cat_name = cat.get("name", "Unknown")
+                
+                # Jika kucing belum dideploy ke tambang
+                if not cat.get("in_field", False):
+                    # Cek slot yang tersedia (dengan asumsi self.mine_capacity sudah update)
+                    if self.mine_capacity == 0:
+                        self.log(f"⚠️ No available slots for {cat_name}, attempting to buy a slot...", Fore.YELLOW)
+                        buy_slot_url = f"{self.BASE_URL}store/buySlot"
+                        buy_slot_response = requests.post(buy_slot_url, headers=headers)
+                        buy_slot_response.raise_for_status()
+                        buy_slot_data = buy_slot_response.json()
+                        if buy_slot_data.get("code") == 400 and "Coins not enough" in buy_slot_data.get("msg", ""):
+                            self.log("⚠️ Not enough coins to buy an additional slot.", Fore.YELLOW)
+                            continue  # Lanjut ke kucing berikutnya
+                        else:
+                            self.log("✅ Slot bought successfully!", Fore.GREEN)
+                    
+                    # Deploy kucing ke tambang
+                    self.log(f"📡 Deploying {cat_name} to the mine...", Fore.CYAN)
+                    deploy_url = f"{self.BASE_URL}mine/onCapacity?cat_id={cat_id}"
+                    deploy_payload = {"cat_id": cat_id}
+                    deploy_response = requests.post(deploy_url, headers=headers, json=deploy_payload)
+                    deploy_response.raise_for_status()
+                    deploy_data = deploy_response.json()
+                    
+                    if deploy_data.get("code") == 200:
+                        self.log(f"✅ {cat_name} deployed successfully!", Fore.GREEN)
+                        mining_summary["deployed"].append(cat_name)
+                        cat["in_field"] = True
+                    else:
+                        self.log(f"⚠️ Failed to deploy {cat_name}: {deploy_data.get('msg', 'Unknown error')}", Fore.YELLOW)
+                        # Jika deploy gagal, coba beli slot lagi dan deploy ulang
+                        self.log(f"📡 Attempting to buy slot again for {cat_name}...", Fore.CYAN)
+                        buy_slot_response = requests.post(f"{self.BASE_URL}store/buySlot", headers=headers)
+                        buy_slot_response.raise_for_status()
+                        buy_slot_data = buy_slot_response.json()
+                        if buy_slot_data.get("code") != 200:
+                            self.log(f"⚠️ Failed to buy slot for {cat_name}: {buy_slot_data.get('msg', 'Unknown error')}", Fore.YELLOW)
+                            continue  # Lanjut ke kucing berikutnya
+                        else:
+                            self.log("✅ Slot bought successfully on retry!", Fore.GREEN)
+                            # Coba deploy lagi
+                            deploy_response = requests.post(deploy_url, headers=headers, json=deploy_payload)
+                            deploy_response.raise_for_status()
+                            deploy_data = deploy_response.json()
+                            if deploy_data.get("code") == 200:
+                                self.log(f"✅ {cat_name} deployed successfully on retry!", Fore.GREEN)
+                                mining_summary["deployed"].append(cat_name)
+                                cat["in_field"] = True
                             else:
-                                self.log("✅ Slot bought successfully!", Fore.GREEN)
-
-                        self.log(f"📡 Deploying {cat['name']} to the field...", Fore.CYAN)
-                        deploy_url = f"{self.BASE_URL}mine/onCapacity?cat_id={cat_id}"
-                        deploy_payload = {"cat_id": cat_id}
-                        deploy_response = requests.post(deploy_url, headers=headers, json=deploy_payload)
-                        deploy_response.raise_for_status()
-
-                        deploy_data = deploy_response.json()
-                        if deploy_data.get("code") == 400 and "already in field" in deploy_data.get("msg", "").lower():
-                            self.log(f"⚠️ {cat['name']} is already in the field.", Fore.YELLOW)
+                                self.log(f"⚠️ Failed to deploy {cat_name} on retry: {deploy_data.get('msg', 'Unknown error')}", Fore.YELLOW)
+                                continue  # Jika masih gagal, lanjut ke kucing berikutnya
+                
+                # Jika kucing sudah dideploy tetapi belum mulai menambang (stage bukan "working")
+                if cat.get("stage", "").lower() != "working":
+                    self.log(f"📡 Starting mining for {cat_name}...", Fore.CYAN)
+                    start_mining_url = f"{self.BASE_URL}mine/start?cat_id={cat_id}"
+                    start_mining_payload = {"cat_id": cat_id}
+                    start_mining_response = requests.post(start_mining_url, headers=headers, json=start_mining_payload)
+                    start_mining_response.raise_for_status()
+                    start_mining_data = start_mining_response.json()
+                    
+                    if start_mining_data.get("code") == 200:
+                        self.log(f"✅ {cat_name} started mining successfully!", Fore.GREEN)
+                        mining_summary["started"].append(cat_name)
+                        cat["stage"] = "working"
+                    else:
+                        self.log(f"⚠️ Failed to start mining for {cat_name}: {start_mining_data.get('msg', 'Unknown error')}", Fore.YELLOW)
+            
+            # Step 3: Ambil daftar kucing yang sedang ada di tambang (current mining cats)
+            self.log("📡 Fetching current mining cats...", Fore.CYAN)
+            current_url = f"{self.BASE_URL}mine/current"
+            current_response = requests.get(current_url, headers=headers)
+            current_response.raise_for_status()
+            current_data = current_response.json()
+            
+            if current_data.get("code") != 200:
+                self.log(f"⚠️ Failed to fetch current mining cats: {current_data.get('msg', 'Unknown error')}", Fore.YELLOW)
+            else:
+                mining_cats = current_data.get("result", {}).get("mining_cats", [])
+                # Step 4: Klaim hasil tambang untuk kucing yang sudah bekerja (stage "working")
+                for mcat in mining_cats:
+                    if mcat.get("stage", "").lower() == "working":
+                        mcat_id = mcat["cat_id"]
+                        mcat_name = mcat.get("name", "Unknown")
+                        self.log(f"📡 Collecting mining earnings for {mcat_name}...", Fore.CYAN)
+                        collect_url = f"{self.BASE_URL}mine/collect?cat_id={mcat_id}"
+                        collect_payload = {"cat_id": mcat_id}
+                        collect_response = requests.post(collect_url, headers=headers, json=collect_payload)
+                        collect_response.raise_for_status()
+                        collect_data = collect_response.json()
+                        
+                        if collect_data.get("code") == 200:
+                            earnings = collect_data.get("result", {}).get("earnings", 0)
+                            self.log(f"✅ {mcat_name} collected {earnings} earnings successfully!", Fore.GREEN)
+                            mining_summary["collected"].append(mcat_name)
                         else:
-                            self.log(f"✅ {cat['name']} deployed successfully!", Fore.GREEN)
-                            mining_summary["deployed_cats"].append(cat['name'])
+                            self.log(f"⚠️ Failed to collect earnings for {mcat_name}: {collect_data.get('msg', 'Unknown error')}", Fore.YELLOW)
+            
+            # Step 5: Lakukan klik pada cat untuk bonus coin.
+            # Ganti {id_catnya} dengan id cat yang diinginkan, misal:
+            click_cat_id = "UCat1736044390630084793"  # Contoh id cat yang akan di-click
+            self.log(f"📡 Clicking cat {click_cat_id} for bonus coins...", Fore.CYAN)
+            click_url = f"{self.BASE_URL}mine/clickCat?cat_id={click_cat_id}&click_times=10"
+            click_response = requests.get(click_url, headers=headers)
+            click_response.raise_for_status()
+            click_data = click_response.json()
+            if click_data.get("code") == 200:
+                coins_earned = click_data.get("result", {}).get("coins", 0)
+                remaining_clicks = click_data.get("result", {}).get("remaining_clicks", 0)
+                self.log(f"✅ Click cat successfully, earned {coins_earned} bonus coins! Remaining clicks: {remaining_clicks}", Fore.GREEN)
+            else:
+                self.log(f"⚠️ Failed to click cat: {click_data.get('msg', 'Unknown error')}", Fore.YELLOW)
 
-                        # Step 3: Start mining for the cat if it's not already mining
-                        self.log(f"📡 Starting mining for {cat['name']}...", Fore.CYAN)
-                        start_mining_url = f"{self.BASE_URL}mine/start?cat_id={cat_id}"
-                        start_mining_payload = {"cat_id": cat_id}
-                        start_mining_response = requests.post(start_mining_url, headers=headers, json=start_mining_payload)
-                        start_mining_response.raise_for_status()
+            if not (mining_summary["deployed"] or mining_summary["started"] or mining_summary["collected"]):
+                self.log("❌ No mining operations were performed.", Fore.RED)
+                return {"status": "error", "msg": "No mining operations were performed."}
 
-                        start_mining_data = start_mining_response.json()
-                        if start_mining_data.get("code") == 400 and "already mining" in start_mining_data.get("msg", "").lower():
-                            self.log(f"⚠️ {cat['name']} is already mining.", Fore.YELLOW)
-                        else:
-                            self.log(f"✅ {cat['name']} started mining successfully!", Fore.GREEN)
-                            mining_summary["mining_started"].append(cat['name'])
+            return {"status": "success", "mining_summary": mining_summary}
 
-                    # Step 4: Click the cat to get coins (10 times)
-                    if cat['user_mining'] == 1:
-                        self.log(f"📡 Clicking {cat['name']} to collect coins...", Fore.CYAN)
-                        click_url = f"{self.BASE_URL}mine/clickCat?cat_id={cat_id}&click_times=10"
-                        click_response = requests.get(click_url, headers=headers)
-                        click_response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            self.log(f"❌ Request failed: {e}", Fore.RED)
+            return {"status": "error", "msg": f"Request failed: {e}"}
+        except Exception as e:
+            self.log(f"❌ An unexpected error occurred: {e}", Fore.RED)
+            return {"status": "error", "msg": f"An unexpected error occurred: {e}"}
+        
+    def box(self):
+        """
+        Membuka semua lootbox yang tersedia.
+        
+        Selama self.claimed_lootboxes lebih dari 0, fungsi akan melakukan loop dan memanggil API
+        {self.BASE_URL}lootbox/draw untuk membuka lootbox. Jika sukses, hasil (misalnya data cat)
+        akan dikumpulkan dan self.claimed_lootboxes akan dikurangi satu setiap kali berhasil membuka.
+        
+        Returns:
+            dict: Dictionary berisi status dan data lootbox yang berhasil dibuka.
+        """
+        try:
+            headers = {"Authorization": self.token}
+            opened_boxes = []  # Menyimpan data lootbox (misalnya cat) yang didapatkan
 
-                        click_data = click_response.json()
-                        if click_data.get("code") == 200:
-                            coins_earned = click_data.get("result", {}).get("coins", 0)
-                            self.log(f"✅ {cat['name']} clicked successfully, earned {coins_earned} coins!", Fore.GREEN)
-                            mining_summary["clicked_cats"].append(cat['name'])
-
-                if not mining_summary["deployed_cats"] and not mining_summary["mining_started"] and not mining_summary["clicked_cats"]:
-                    self.log("❌ No cats were deployed, mining started, or clicked.", Fore.RED)
-                    return {"status": "error", "msg": "No cats were deployed, mining started, or clicked."}
-
-                return {"status": "success", "mining_summary": mining_summary}
-
+            # Loop selama masih ada lootbox yang belum diklaim
+            while self.claimed_lootboxes > 0:
+                self.log("📡 Drawing a lootbox...", Fore.CYAN)
+                draw_url = f"{self.BASE_URL}lootbox/draw"
+                response = requests.post(draw_url, headers=headers)
+                response.raise_for_status()
+                data = response.json()
+                
+                if data.get("code") == 200:
+                    cat = data.get("result", {}).get("cat")
+                    if cat:
+                        cat_name = cat.get("name", "Unknown")
+                        self.log(f"✅ Lootbox drawn successfully: obtained cat {cat_name}!", Fore.GREEN)
+                        opened_boxes.append(cat)
+                    else:
+                        self.log("⚠️ Lootbox drawn but no cat found in result.", Fore.YELLOW)
+                    # Kurangi jumlah lootbox yang belum diklaim
+                    self.claimed_lootboxes -= 1
+                else:
+                    self.log(f"⚠️ Failed to draw lootbox: {data.get('msg', 'Unknown error')}", Fore.YELLOW)
+                    break  # Hentikan loop jika terjadi error
+            
+            if opened_boxes:
+                return {"status": "success", "opened_boxes": opened_boxes}
+            else:
+                self.log("❌ No lootboxes were drawn.", Fore.RED)
+                return {"status": "error", "msg": "No lootboxes were drawn."}
+        
         except requests.exceptions.RequestException as e:
             self.log(f"❌ Request failed: {e}", Fore.RED)
             return {"status": "error", "msg": f"Request failed: {e}"}
@@ -486,16 +624,20 @@ if __name__ == "__main__":
         cat.login(index)
 
         cat.log("🛠️ Starting task execution...")
-        tasks = {
-            "task": "🌞 Auto Complete Task",  
-            "cat": "💳 Cat Purchase and Collection", 
-            "mining": "⛏️ Mining and Cat Deployment", 
-        }
+        tasks = [
+            ("task", "🌞 Auto Complete Task"),
+            ("box", "📦 Open Loot Box"),
+            ("mining", "⛏️ Mining and Cat Deployment - First"),
+            ("cat", "💳 Cat Purchase and Collection"),
+            ("mining", "⛏️ Mining and Cat Deployment - Last")
+        ]
 
-
-        for task_key, task_name in tasks.items():
+        for task_key, task_name in tasks:
             task_status = config.get(task_key, False)
-            cat.log(f"[CONFIG] {task_name}: {'✅ Enabled' if task_status else '❌ Disabled'}", Fore.YELLOW if task_status else Fore.RED)
+            cat.log(
+                f"[CONFIG] {task_name}: {'✅ Enabled' if task_status else '❌ Disabled'}",
+                Fore.YELLOW if task_status else Fore.RED,
+            )
 
             if task_status:
                 cat.log(f"🔄 Executing {task_name}...")
