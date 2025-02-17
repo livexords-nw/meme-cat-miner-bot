@@ -22,19 +22,13 @@ With this bot, you can save time and maximize your outcomes without manual inter
 
 ---
 
-## 🌟 **Version v1.1.0**
+## 🌟 **Version v1.3.0**
 
-### 🔄 **Features**
+### 🔄 **Update**
 
-- **Task Automation:** Automatically complete tasks to earn rewards.
-- **Cat Automation:** Purchase cats automatically to optimize mining operations.
-- **Mining Automation:**
-  - Improved mining system with enhanced cat deployment.
-  - Upgraded purchasing system for additional cat slots.
-  - Optimized cat tapping mechanism for maximum earnings.
-- **Loot Box Automation:** Automatically open loot boxes to collect rewards.
-- **System Improvements:** Enhanced mining, cat purchasing, and loot box systems for a smoother experience.
-- **Delay Configuration:** Customize delays between loops and account switching for efficient multitasking.
+1. Added system for claiming loot boxes.
+2. Optimized mining system.
+3. Optimized cat purchasing system.
 
 ---
 
